@@ -1,0 +1,298 @@
+-- Fly Bypass v7 - DETECTION MINIMIZADA
+-- BodyVelocity + BodyGyro (funciona) pero con movimiento HUMANIZADO
+-- El anti-cheat detecta PATRONES CONSTANTES, no instancias
+
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
+local Character = Player.Character or Player.CharacterAdded:Wait()
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+local Humanoid = Character:WaitForChild("Humanoid")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+-- ══════════════════════════════════════════════════
+-- CONFIG
+-- ══════════════════════════════════════════════════
+local BASE_SPEED = 210
+local SPEED_VAR = 15         -- variación aleatoria: 195-210
+local JITTER = 0.05          -- micro-ruido en dirección
+local DIP_MIN = 3            -- cada cuantos segundos hacer un "dip"
+local DIP_MAX = 8
+local DIP_DUR = 0.15         -- duración del dip
+local DIP_FACTOR = 0.3       -- velocidad durante dip (30%)
+local RAMP_TIME = 2          -- segundos para llegar a velocidad máxima
+
+local AUTO_ITEMS = {"Flying Carpet", "Flying Bee", "Wave Rider", "Santa's Sleigh", "Cupid's Wings", "Witch's Broom", "Heart Balloon"}
+
+-- ══════════════════════════════════════════════════
+-- ESTADO
+-- ══════════════════════════════════════════════════
+local flying = false
+local flySpeed = 0
+local flyConnection = nil
+local noclipConnection = nil
+local BodyVelocity = nil
+local BodyGyro = nil
+local savedWS = 16
+
+local keys = {
+    W = false, A = false, S = false,
+    D = false, Space = false, LeftShift = false
+}
+
+-- Estado de humanización
+local flyStartTime = 0
+local lastSpeedCalc = 0
+local currentVarSpeed = BASE_SPEED
+local nextDipTime = 0
+local dipActive = false
+local dipEndTime = 0
+
+local itemConns = {}
+
+-- ══════════════════════════════════════════════════
+-- UTILIDADES
+-- ══════════════════════════════════════════════════
+local function isAutoItem(name)
+    for _, n in ipairs(AUTO_ITEMS) do
+        if name == n then return true end
+    end
+    return false
+end
+
+local function anyItemEquipped(char)
+    for _, child in pairs(char:GetChildren()) do
+        if child:IsA("Tool") and isAutoItem(child.Name) then
+            return true
+        end
+    end
+    return false
+end
+
+local function calcVarSpeed()
+    -- Velocidad que varía naturalmente entre BASE_SPEED-VAR y BASE_SPEED
+    return BASE_SPEED - math.random(0, SPEED_VAR)
+end
+
+local function jitterVec(v)
+    return Vector3.new(
+        v.X + (math.random() - 0.5) * 2 * JITTER,
+        v.Y + (math.random() - 0.5) * 2 * JITTER,
+        v.Z + (math.random() - 0.5) * 2 * JITTER
+    )
+end
+
+-- ══════════════════════════════════════════════════
+-- RESPAWN
+-- ══════════════════════════════════════════════════
+Player.CharacterAdded:Connect(function(char)
+    Character = char
+    HumanoidRootPart = char:WaitForChild("HumanoidRootPart")
+    Humanoid = char:WaitForChild("Humanoid")
+    if flying then
+        wait(0.5)
+        startFly()
+    end
+    wait(0.3)
+    hookItems(char)
+end)
+
+-- ══════════════════════════════════════════════════
+-- NOCLIP SELECTIVO (solo HRP + Head)
+-- ══════════════════════════════════════════════════
+local function enableNoclip()
+    if noclipConnection then noclipConnection:Disconnect() end
+    noclipConnection = RunService.Stepped:Connect(function()
+        pcall(function()
+            if HumanoidRootPart and HumanoidRootPart.Parent then
+                HumanoidRootPart.CanCollide = false
+            end
+            local head = Character and Character:FindFirstChild("Head")
+            if head then head.CanCollide = false end
+        end)
+    end)
+end
+
+local function disableNoclip()
+    if noclipConnection then
+        noclipConnection:Disconnect()
+        noclipConnection = nil
+    end
+end
+
+-- ══════════════════════════════════════════════════
+-- INPUT
+-- ══════════════════════════════════════════════════
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.W then keys.W = true end
+    if input.KeyCode == Enum.KeyCode.A then keys.A = true end
+    if input.KeyCode == Enum.KeyCode.S then keys.S = true end
+    if input.KeyCode == Enum.KeyCode.D then keys.D = true end
+    if input.KeyCode == Enum.KeyCode.Space then keys.Space = true end
+    if input.KeyCode == Enum.KeyCode.LeftShift then keys.LeftShift = true end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.W then keys.W = false end
+    if input.KeyCode == Enum.KeyCode.A then keys.A = false end
+    if input.KeyCode == Enum.KeyCode.S then keys.S = false end
+    if input.KeyCode == Enum.KeyCode.D then keys.D = false end
+    if input.KeyCode == Enum.KeyCode.Space then keys.Space = false end
+    if input.KeyCode == Enum.KeyCode.LeftShift then keys.LeftShift = false end
+end)
+
+-- ══════════════════════════════════════════════════
+-- VUELO CON HUMANIZACIÓN
+-- ══════════════════════════════════════════════════
+function startFly()
+    Character = Player.Character or Player.CharacterAdded:Wait()
+    HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+    Humanoid = Character:WaitForChild("Humanoid")
+
+    -- Guardar y modificar
+    savedWS = Humanoid.WalkSpeed
+    Humanoid.WalkSpeed = 0
+
+    -- BodyVelocity
+    BodyVelocity = Instance.new("BodyVelocity")
+    BodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    BodyVelocity.Velocity = Vector3.new(0, 0, 0)
+    BodyVelocity.P = 15000
+    BodyVelocity.Parent = HumanoidRootPart
+
+    -- BodyGyro
+    BodyGyro = Instance.new("BodyGyro")
+    BodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    BodyGyro.D = 200
+    BodyGyro.P = 25000
+    BodyGyro.Parent = HumanoidRootPart
+
+    enableNoclip()
+    Humanoid.PlatformStand = true
+
+    -- Inicializar humanización
+    flyStartTime = tick()
+    lastSpeedCalc = tick()
+    currentVarSpeed = 0
+    nextDipTime = tick() + math.random(DIP_MIN * 10, DIP_MAX * 10) / 10
+    dipActive = false
+    dipEndTime = 0
+
+    flyConnection = RunService.Heartbeat:Connect(function()
+        if not HumanoidRootPart or not HumanoidRootPart.Parent then return end
+
+        local cam = workspace.CurrentCamera
+        local camCF = cam.CFrame
+        local now = tick()
+
+        -- ═══ SPEED RAMPING (arranque gradual) ═══
+        local elapsed = now - flyStartTime
+        local rampFactor = math.min(elapsed / RAMP_TIME, 1)
+
+        -- ═══ SPEED VARIATION (nunca constante) ═══
+        if now - lastSpeedCalc > 0.3 + math.random() * 0.4 then
+            currentVarSpeed = calcVarSpeed()
+            lastSpeedCalc = now
+        end
+
+        local finalSpeed = currentVarSpeed * rampFactor
+
+        -- ═══ VELOCITY DIPS (micro-pausas naturales) ═══
+        if now >= nextDipTime and not dipActive then
+            dipActive = true
+            dipEndTime = now + DIP_DUR + math.random() * 0.15
+        end
+
+        if dipActive then
+            finalSpeed = finalSpeed * DIP_FACTOR
+            if now >= dipEndTime then
+                dipActive = false
+                nextDipTime = now + math.random(DIP_MIN * 10, DIP_MAX * 10) / 10
+            end
+        end
+
+        -- ═══ DIRECCIÓN CON JITTER ═══
+        local direction = Vector3.new(0, 0, 0)
+        if keys.W then direction = direction + camCF.LookVector end
+        if keys.S then direction = direction - camCF.LookVector end
+        if keys.A then direction = direction - camCF.RightVector end
+        if keys.D then direction = direction + camCF.RightVector end
+        if keys.Space then direction = direction + Vector3.new(0, 1, 0) end
+        if keys.LeftShift then direction = direction - Vector3.new(0, 1, 0) end
+
+        if direction.Magnitude > 0 then
+            direction = jitterVec(direction.Unit)
+            BodyVelocity.Velocity = direction * finalSpeed
+        else
+            BodyVelocity.Velocity = Vector3.new(0, 0, 0)
+        end
+
+        BodyGyro.CFrame = camCF
+    end)
+
+    flying = true
+end
+
+local function stopFly()
+    flying = false
+
+    if flyConnection then flyConnection:Disconnect() flyConnection = nil end
+    if BodyVelocity then BodyVelocity:Destroy() BodyVelocity = nil end
+    if BodyGyro then BodyGyro:Destroy() BodyGyro = nil end
+    if Humanoid then
+        Humanoid.PlatformStand = false
+        Humanoid.WalkSpeed = savedWS
+    end
+    disableNoclip()
+end
+
+-- ══════════════════════════════════════════════════
+-- DETECCIÓN DE ITEMS
+-- ══════════════════════════════════════════════════
+function hookItems(char)
+    for _, c in pairs(itemConns) do pcall(function() c:Disconnect() end) end
+    itemConns = {}
+
+    local function connectTool(tool)
+        if not tool:IsA("Tool") or not isAutoItem(tool.Name) then return end
+
+        table.insert(itemConns, tool.Equipped:Connect(function()
+            if not flying then
+                startFly()
+            end
+        end))
+
+        table.insert(itemConns, tool.Unequipped:Connect(function()
+            if not anyItemEquipped(char) and flying then
+                stopFly()
+            end
+        end))
+    end
+
+    for _, child in pairs(char:GetChildren()) do connectTool(child) end
+    table.insert(itemConns, char.ChildAdded:Connect(function(child) connectTool(child) end))
+end
+
+if Player.Character then hookItems(Player.Character) end
+
+-- ══════════════════════════════════════════════════
+-- BOTONES
+-- ══════════════════════════════════════════════════
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.p then
+        if not flying then
+            startFly()
+        else
+            stopFly()
+        end
+    end
+end)
+
+print("═══════════════════════════════════")
+print("  FLY BYPASS v7 - HUMANIZED")
+print("  Speed: " .. BASE_SPEED .. " (varies ±" .. SPEED_VAR .. ")")
+print("  Items: Flying Carpet, Flying Bee")
+print("  P = Toggle manual")
+print("═══════════════════════════════════")
