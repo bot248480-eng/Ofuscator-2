@@ -1,5 +1,5 @@
--- Fly Bypass v8 - MULTIPLATAFORMA + FIX CARPET STUCK
--- Compatible PC + Móvil | Anti-stuck en equip/desequip
+-- Fly Bypass v8.1 - MULTIPLATAFORMA + JOYSTICK NATIVO
+-- Compatible PC + Móvil | Joystick del juego funcional | Anti-stuck
 
 local Players = game:GetService("Players")
 local Player = Players.LocalPlayer
@@ -9,7 +9,6 @@ local Humanoid = Character:WaitForChild("Humanoid")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
-local StarterGui = game:GetService("StarterGui")
 
 -- ══════════════════════════════════════════════════
 -- CONFIG
@@ -29,7 +28,6 @@ local AUTO_ITEMS = {"Flying Carpet", "Flying Bee", "Wave Rider", "Santa's Sleigh
 -- ESTADO
 -- ══════════════════════════════════════════════════
 local flying = false
-local flySpeed = 0
 local flyConnection = nil
 local noclipConnection = nil
 local BodyVelocity = nil
@@ -45,11 +43,6 @@ local keys = {
     D = false, Space = false, LeftShift = false
 }
 
--- Touch (Móvil)
-local touchMoveVector = Vector3.new(0, 0, 0)
-local touchJump = false
-local touchDescend = false
-
 -- Estado de humanización
 local flyStartTime = 0
 local lastSpeedCalc = 0
@@ -60,11 +53,15 @@ local dipEndTime = 0
 
 local itemConns = {}
 
--- UI References
+-- UI Móvil
 local mobileGui = nil
 local toggleButton = nil
 local ascendButton = nil
 local descendButton = nil
+
+-- PlayerModule (para leer joystick nativo en móvil)
+local controlsModule = nil
+local getMoveVector = nil
 
 -- ══════════════════════════════════════════════════
 -- UTILIDADES
@@ -97,43 +94,56 @@ local function jitterVec(v)
     )
 end
 
-local function isPlatformStandActive()
+-- ══════════════════════════════════════════════════
+-- LEER JOYSTICK NATIVO DEL JUEGO
+-- ══════════════════════════════════════════════════
+local function initControlsModule()
     pcall(function()
-        if Humanoid then
-            return Humanoid:GetState() == Enum.HumanoidStateType.PlatformStanding
+        local PlayerModule = require(Player.PlayerScripts:WaitForChild("PlayerModule"))
+        controlsModule = PlayerModule:GetControls()
+        getMoveVector = function()
+            return controlsModule:GetMoveVector()
         end
     end)
-    return false
+    -- Fallback si no carga
+    if not getMoveVector then
+        getMoveVector = function()
+            return Vector3.new(0, 0, 0)
+        end
+    end
+end
+
+local function getJoystickInput()
+    if not getMoveVector then return Vector3.new(0, 0, 0) end
+    local ok, vec = pcall(getMoveVector)
+    if ok and vec then
+        return vec -- Vector3(X, 0, Z) donde X = horizontal, Z = adelante/atrás
+    end
+    return Vector3.new(0, 0, 0)
 end
 
 -- ══════════════════════════════════════════════════
--- FIX CARPET STUCK - Restauración completa del humanoid
+-- FIX CARPET STUCK
 -- ══════════════════════════════════════════════════
 local function forceResetHumanoid()
     pcall(function()
         if not Humanoid or not Humanoid.Parent then return end
-        
-        -- 1. Quitar PlatformStand
+
         Humanoid.PlatformStand = false
         Humanoid.Sit = false
-        
-        -- 2. Restaurar WalkSpeed
         Humanoid.WalkSpeed = savedWS or 16
-        
-        -- 3. Forzar cambio de estado a GettingUp
-        Humanoid:ChangeState(Enum.HumanoidStateType.GetningUp)
+
+        Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
         task.wait(0.05)
         Humanoid:ChangeState(Enum.HumanoidStateType.Running)
-        
-        -- 4. Si sigue atascado, respawnear animaciones
+
         local animator = Humanoid:FindFirstChildOfClass("Animator")
         if animator then
             for _, track in pairs(animator:GetPlayingAnimationTracks()) do
                 track:Stop(0)
             end
         end
-        
-        -- 5. Asegurar que el HRP tiene física correcta
+
         if HumanoidRootPart and HumanoidRootPart.Parent then
             HumanoidRootPart.CanCollide = true
             HumanoidRootPart.Anchored = false
@@ -142,17 +152,17 @@ local function forceResetHumanoid()
 end
 
 -- ══════════════════════════════════════════════════
--- UI MÓVIL - Botones flotantes
+-- UI MÓVIL - Solo toggle + subir/bajar (joystick maneja dirección)
 -- ══════════════════════════════════════════════════
 local function createMobileUI()
     if mobileGui then return end
-    
+
     mobileGui = Instance.new("ScreenGui")
     mobileGui.Name = "FlyMobileUI"
     mobileGui.ResetOnSpawn = false
     mobileGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     mobileGui.Parent = Player.PlayerGui
-    
+
     -- ═══ BOTÓN TOGGLE FLY ═══
     toggleButton = Instance.new("TextButton")
     toggleButton.Name = "FlyToggle"
@@ -165,17 +175,17 @@ local function createMobileUI()
     toggleButton.TextSize = 32
     toggleButton.Font = Enum.Font.GothamBold
     toggleButton.Parent = mobileGui
-    
+
     local toggleCorner = Instance.new("UICorner")
     toggleCorner.CornerRadius = UDim.new(0, 35)
     toggleCorner.Parent = toggleButton
-    
+
     local toggleStroke = Instance.new("UIStroke")
     toggleStroke.Color = Color3.fromRGB(100, 200, 255)
     toggleStroke.Thickness = 2
     toggleStroke.Parent = toggleButton
-    
-    -- ═══ BOTÓN ASCENDER ═══
+
+    -- ═══ BOTÓN SUBIR ═══
     ascendButton = Instance.new("TextButton")
     ascendButton.Name = "AscendBtn"
     ascendButton.Size = UDim2.new(0, 55, 0, 55)
@@ -187,12 +197,12 @@ local function createMobileUI()
     ascendButton.TextSize = 28
     ascendButton.Font = Enum.Font.GothamBold
     ascendButton.Parent = mobileGui
-    
+
     local ascendCorner = Instance.new("UICorner")
     ascendCorner.CornerRadius = UDim.new(0, 27)
     ascendCorner.Parent = ascendButton
-    
-    -- ═══ BOTÓN DESCENDER ═══
+
+    -- ═══ BOTÓN BAJAR ═══
     descendButton = Instance.new("TextButton")
     descendButton.Name = "DescendBtn"
     descendButton.Size = UDim2.new(0, 55, 0, 55)
@@ -204,11 +214,11 @@ local function createMobileUI()
     descendButton.TextSize = 28
     descendButton.Font = Enum.Font.GothamBold
     descendButton.Parent = mobileGui
-    
+
     local descendCorner = Instance.new("UICorner")
     descendCorner.CornerRadius = UDim.new(0, 27)
     descendCorner.Parent = descendButton
-    
+
     -- ═══ CONEXIONES ═══
     toggleButton.MouseButton1Click:Connect(function()
         if not flying then
@@ -221,21 +231,28 @@ local function createMobileUI()
             toggleButton.Text = "✈"
         end
     end)
-    
-    ascendButton.MouseButton1Down:Connect(function()
-        touchJump = true
-    end)
-    ascendButton.MouseButton1Up:Connect(function()
-        touchJump = false
-    end)
-    
-    descendButton.MouseButton1Down:Connect(function()
-        touchDescend = true
-    end)
-    descendButton.MouseButton1Up:Connect(function()
-        touchDescend = false
-    end)
+
+    local ascending = false
+    local descending = false
+
+    ascendButton.MouseButton1Down:Connect(function() ascending = true end)
+    ascendButton.MouseButton1Up:Connect(function() ascending = false end)
+    ascendButton.TouchLongPress:Connect(function() ascending = true end)
+
+    descendButton.MouseButton1Down:Connect(function() descending = true end)
+    descendButton.MouseButton1Up:Connect(function() descending = false end)
+    descendButton.TouchLongPress:Connect(function() descending = true end)
+
+    -- Guardar refs para el loop de vuelo
+    return function()
+        local yDir = 0
+        if ascending then yDir = yDir + 1 end
+        if descending then yDir = yDir - 1 end
+        return yDir
+    end
 end
+
+local getYInput = nil
 
 local function destroyMobileUI()
     if mobileGui then
@@ -245,6 +262,7 @@ local function destroyMobileUI()
         ascendButton = nil
         descendButton = nil
     end
+    getYInput = nil
 end
 
 -- ══════════════════════════════════════════════════
@@ -276,19 +294,19 @@ Player.CharacterAdded:Connect(function(char)
     Character = char
     HumanoidRootPart = char:WaitForChild("HumanoidRootPart")
     Humanoid = char:WaitForChild("Humanoid")
-    
-    -- Reset completo de estado al respawnear
+
     if flying then
         flying = false
         if flyConnection then flyConnection:Disconnect() flyConnection = nil end
         if BodyVelocity then pcall(function() BodyVelocity:Destroy() end) BodyVelocity = nil end
         if BodyGyro then pcall(function() BodyGyro:Destroy() end) BodyGyro = nil end
         disableNoclip()
-        
-        wait(0.8)
+        destroyMobileUI()
+
+        task.wait(0.8)
         startFly()
     end
-    wait(0.3)
+    task.wait(0.3)
     hookItems(char)
 end)
 
@@ -308,7 +326,7 @@ local function enableNoclip()
     end)
 end
 
-local function disableNoclip()
+function disableNoclip()
     if noclipConnection then
         noclipConnection:Disconnect()
         noclipConnection = nil
@@ -316,26 +334,23 @@ local function disableNoclip()
 end
 
 -- ══════════════════════════════════════════════════
--- VUELO CON HUMANIZACIÓN + SOPORTE MÓVIL
+-- VUELO CON HUMANIZACIÓN + JOYSTICK NATIVO
 -- ══════════════════════════════════════════════════
 function startFly()
     Character = Player.Character or Player.CharacterAdded:Wait()
     HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
     Humanoid = Character:WaitForChild("Humanoid")
 
-    -- Guardar y modificar
     savedWS = Humanoid.WalkSpeed
     Humanoid.WalkSpeed = 0
     Humanoid.PlatformStand = true
 
-    -- BodyVelocity
     BodyVelocity = Instance.new("BodyVelocity")
     BodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
     BodyVelocity.Velocity = Vector3.new(0, 0, 0)
     BodyVelocity.P = 15000
     BodyVelocity.Parent = HumanoidRootPart
 
-    -- BodyGyro
     BodyGyro = Instance.new("BodyGyro")
     BodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
     BodyGyro.D = 200
@@ -344,12 +359,13 @@ function startFly()
 
     enableNoclip()
 
-    -- Crear UI móvil si es necesario
+    -- UI Móvil + obtener función de input vertical
     if isMobile then
-        createMobileUI()
+        initControlsModule()
+        getYInput = createMobileUI()
     end
 
-    -- Inicializar humanización
+    -- Humanización
     flyStartTime = tick()
     lastSpeedCalc = tick()
     currentVarSpeed = 0
@@ -390,29 +406,37 @@ function startFly()
             end
         end
 
-        -- ═══ DIRECCIÓN (PC + Móvil) ═══
+        -- ═══ DIRECCIÓN ═══
         local direction = Vector3.new(0, 0, 0)
-        
+
         if isMobile then
-            -- Móvil: usar MoveDirection del humanoid + botones ascend/descend
-            local moveDir = Humanoid.MoveDirection
-            if moveDir.Magnitude > 0 then
-                -- Proyectar MoveDirection al plano de la cámara
-                local camForward = camCF.LookVector * Vector3.new(1, 0, 1)
-                local camRight = camCF.RightVector * Vector3.new(1, 0, 1)
+            -- JOYSTICK NATIVO: GetMoveVector() devuelve Vector3(X, 0, Z)
+            -- X = -1 (izquierda) a 1 (derecha)
+            -- Z = -1 (adelante) a 1 (atrás) ← invertido respecto a LookVector
+            local moveVec = getJoystickInput()
+
+            if moveVec.Magnitude > 0.05 then
+                local camForward = camCF.LookVector
+                local camRight = camCF.RightVector
+                -- Proyectar solo en plano horizontal
+                camForward = Vector3.new(camForward.X, 0, camForward.Z)
+                camRight = Vector3.new(camRight.X, 0, camRight.Z)
                 if camForward.Magnitude > 0 then camForward = camForward.Unit end
                 if camRight.Magnitude > 0 then camRight = camRight.Unit end
-                
-                direction = (camForward * moveDir.Z * -1) + (camRight * moveDir.X)
+
+                -- moveVec.Z negativo = adelante en el joystick
+                direction = direction + (camForward * -moveVec.Z) + (camRight * moveVec.X)
             end
-            if touchJump then
-                direction = direction + Vector3.new(0, 1, 0)
-            end
-            if touchDescend then
-                direction = direction - Vector3.new(0, 1, 0)
+
+            -- Subir/bajar con botones
+            if getYInput then
+                local yInput = getYInput()
+                if yInput ~= 0 then
+                    direction = direction + Vector3.new(0, yInput, 0)
+                end
             end
         else
-            -- PC: teclado WASD
+            -- PC: Teclado
             if keys.W then direction = direction + camCF.LookVector end
             if keys.S then direction = direction - camCF.LookVector end
             if keys.A then direction = direction - camCF.RightVector end
@@ -425,7 +449,6 @@ function startFly()
             direction = jitterVec(direction.Unit)
             BodyVelocity.Velocity = direction * finalSpeed
         else
-            -- Mantener posición flotante cuando no hay input
             BodyVelocity.Velocity = Vector3.new(0, 0.5, 0)
         end
 
@@ -441,22 +464,20 @@ local function stopFly()
     if flyConnection then flyConnection:Disconnect() flyConnection = nil end
     if BodyVelocity then pcall(function() BodyVelocity:Destroy() end) BodyVelocity = nil end
     if BodyGyro then pcall(function() BodyGyro:Destroy() end) BodyGyro = nil end
-    
+
     disableNoclip()
-    
-    -- Destruir UI móvil
+
     if isMobile then
         destroyMobileUI()
     end
-    
-    -- FIX CRÍTICO: Restaurar humanoid completamente
+
     task.defer(function()
         forceResetHumanoid()
     end)
 end
 
 -- ══════════════════════════════════════════════════
--- DETECCIÓN DE ITEMS - CON FIX CARPET STUCK
+-- DETECCIÓN DE ITEMS
 -- ══════════════════════════════════════════════════
 function hookItems(char)
     for _, c in pairs(itemConns) do pcall(function() c:Disconnect() end) end
@@ -472,7 +493,6 @@ function hookItems(char)
         end))
 
         table.insert(itemConns, tool.Unequipped:Connect(function()
-            -- FIX: Pequeño delay para evitar race condition
             task.wait(0.1)
             if not anyItemEquipped(char) and flying then
                 stopFly()
@@ -482,8 +502,6 @@ function hookItems(char)
 
     for _, child in pairs(char:GetChildren()) do connectTool(child) end
     table.insert(itemConns, char.ChildAdded:Connect(function(child) connectTool(child) end))
-    
-    -- FIX: Detectar si el tool se destruye mientras está equipado
     table.insert(itemConns, char.ChildRemoved:Connect(function(child)
         if child:IsA("Tool") and isAutoItem(child.Name) and flying then
             task.wait(0.1)
@@ -497,7 +515,7 @@ end
 if Player.Character then hookItems(Player.Character) end
 
 -- ══════════════════════════════════════════════════
--- BOTONES PC
+-- TOGGLE PC
 -- ══════════════════════════════════════════════════
 UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
@@ -514,10 +532,10 @@ end)
 -- LOG
 -- ══════════════════════════════════════════════════
 print("═══════════════════════════════════")
-print("  FLY BYPASS v8 - MULTIPLATAFORMA")
+print("  FLY BYPASS v8.1 - MULTIPLATAFORMA")
 print("  Speed: " .. BASE_SPEED .. " (varies ±" .. SPEED_VAR .. ")")
 print("  Plataforma: " .. (isMobile and "MÓVIL" or "PC"))
+print("  Joystick nativo: ACTIVO")
 print("  Items: Flying Carpet, Flying Bee, etc.")
-print("  P = Toggle manual (PC)")
-print("  ✈  = Toggle manual (Móvil)")
+print("  P = Toggle (PC) | ✈ = Toggle (Móvil)")
 print("═══════════════════════════════════")
