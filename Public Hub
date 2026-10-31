@@ -6047,7 +6047,7 @@ do
 	_G.invisibleStealEnabled = false
 	_G.InvisStealAngle = mainConfig.InvisStealAngle or 225
 	_G.SinkSliderValue = mainConfig.SinkSliderValue or 7
-	_G.AutoRecoverLagback = mainConfig.AutoRecoverLagback ~= nil and mainConfig.AutoRecoverLagback or true
+	_G.AutoRecoverLagback = mainConfig.AutoRecoverLagback == nil and true or mainConfig.AutoRecoverLagback
 	_G.AutoInvisDuringSteal = mainConfig.AutoInvisDuringSteal or false
 	_G.BJK_InvisDelayEnabled = mainConfig.InvisDelayEnabled == true
 	_G.BJK_InvisDelayMs = tonumber(mainConfig.InvisDelayMs) or 0
@@ -6624,323 +6624,479 @@ do
 		return n11
 	end
 
-	function invisTurnOff()
-		fn14()
-		if not animPlaying then
-			return
-		end
-		local character2 = player.Character and player.Character.FindFirstChildOfClass(player.Character, "Humanoid")
-		animPlaying = false
-		_G.invisibleStealEnabled = false
-		setToggle("Invisible Steal", false)
+-- Adaptadores del entorno de Eclipse Hub (Script 1) para el mecanismo nuevo.
+-- El Hub ya define `player`, `Players` y `RunService` antes de esta sección.
+local LocalPlayer = player or Players.LocalPlayer
 
-		for k, v9 in pairs(tracks) do
-			pcall(function()
-				v9:Stop(0)
-			end)
-		end
+local function numberOr(value, fallback)
+    local n = tonumber(value)
+    if n == nil then return fallback end
+    return n
+end
 
-		tracks = {}
+-- El controlador original detecta el robo por atributo, índice o herramienta.
+-- Se reutiliza esa detección para que la recuperación no dependa solo de un atributo.
+local function isStealingNow()
+    if type(fn8) == "function" then
+        local ok, result = pcall(fn8)
+        if ok and result == true then
+            return true
+        end
+    end
+    return LocalPlayer ~= nil and LocalPlayer:GetAttribute("Stealing") == true
+end
 
-		if connection then
-			connection:Disconnect()
-			connection = nil
-		end
+local active = false
+local connections = {}
+local realHRP, cloneHRP, animationTrack
 
-		for i, v9 in ipairs(folderConnections) do
-			if v9 then
-				v9:Disconnect()
-			end
-		end
+local function syncInvisUi(state)
+    pcall(setToggle, "Invisible Steal", state == true)
+    if _G.updateMovementPanelInvisVisual then
+        pcall(_G.updateMovementPanelInvisVisual, state == true)
+    end
+end
+local activeCharacter, activeHumanoid
+local savedHipHeight, savedPrimaryPart, savedCanCollide
+local savedTransparency = nil
+local savedHumanoidStates = {}
+local autoStarted = false
+local autoArmed = false
+local restarting = false
+local lastTarget = nil
 
-		folderConnections = {}
+local STATES_TO_TOGGLE = {
+    Enum.HumanoidStateType.Dead,
+    Enum.HumanoidStateType.FallingDown,
+    Enum.HumanoidStateType.Ragdoll,
+}
 
-		if oldRoot and oldRoot.Parent and clone and clone.Parent then
-			pcall(function()
-				local tbl9 = {}
-				oldRoot.CFrame = clone.CFrame
-				oldRoot.Velocity = Vector3.zero
-				clone.Velocity = Vector3.zero
-			end)
+local function addConnection(connection)
+    if connection then
+        table.insert(connections, connection)
+    end
+end
 
-			RunService.Heartbeat:Wait()
-			RunService.Heartbeat:Wait()
-		end
+local function disconnectAll()
+    for _, connection in ipairs(connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    table.clear(connections)
+end
 
-		revertClone()
-		fn14()
-		local character3 = player.Character and player.Character.FindFirstChild(player.Character, "HumanoidRootPart")
+local function currentDepthOffset()
+    -- Se conserva la conversión usada por el mecanismo original.
+    return 0.01 + (math.clamp(numberOr(_G.SinkSliderValue, 8), 0, 18) / 18) * 0.19
+end
 
-		if character3 then
-			pcall(function()
-				character3.Velocity = Vector3.zero
-			end)
-		end
+local function currentAngle()
+    return math.clamp(numberOr(_G.InvisStealAngle, 180), 0, 360)
+end
 
-		if character2 then
-			pcall(function()
-				local animator = character2:FindFirstChildOfClass("Animator")
+local function rewireCharacter(character, fromPart, toPart)
+    if not (character and fromPart and toPart) then return end
+    for _, item in ipairs(character:GetDescendants()) do
+        if item:IsA("Weld") or item:IsA("Motor6D") then
+            if item.Part0 == fromPart then item.Part0 = toPart end
+            if item.Part1 == fromPart then item.Part1 = toPart end
+        end
+    end
+end
 
-				if animator then
-					for i, v9 in ipairs(animator:GetPlayingAnimationTracks()) do
-						if v9.Priority == Enum.AnimationPriority.Action4 or v9.Priority == Enum.AnimationPriority.Action3 then
-							v9:Stop(0)
-						end
-					end
-				end
+local stop
 
-				character2:ChangeState(Enum.HumanoidStateType.GettingUp)
+stop = function()
+    active = false
+    autoArmed = false
+    disconnectAll()
 
-				task.defer(function()
-					if character2 and character2.Parent then
-						character2:ChangeState(Enum.HumanoidStateType.Running)
-					end
-				end)
-			end)
-		end
+    if animationTrack then
+        pcall(function()
+            animationTrack:AdjustSpeed(1)
+            animationTrack:Stop(0)
+            animationTrack:Destroy()
+        end)
+        animationTrack = nil
+    end
 
-		if _G.updateMovementPanelInvisVisual then
-			pcall(_G.updateMovementPanelInvisVisual, false)
-		end
+    if savedTransparency then
+        for part, oldValue in pairs(savedTransparency) do
+            if part and part.Parent then
+                pcall(function()
+                    part.LocalTransparencyModifier = oldValue
+                end)
+            end
+        end
+        savedTransparency = nil
+    end
 
-		_invisToggleCooldown = os.clock()
-	end
+    local character = activeCharacter
+    local humanoid = activeHumanoid
 
-	invisTurnOn = function()
-		if animPlaying then
-			return
-		end
+    if character and character.Parent and realHRP and realHRP:IsDescendantOf(game) then
+        pcall(function()
+            local temp = Instance.new("Model")
+            temp.Name = "InvisRestore"
+            temp.Parent = game
 
-		if _G.bjkInstaResetting or _G._instaResetTime and os.clock() - _G._instaResetTime < 2 then
-			return
-		end
+            character.Parent = temp
+            realHRP.Parent = character
 
-		if not player.Character then
-			return
-		end
-		local v9 = player.Character.FindFirstChildOfClass(player.Character, "Humanoid")
-		if not v9 then
-			return
-		end
-		animPlaying = true
-		_G.invisibleStealEnabled = true
-		setToggle("Invisible Steal", true)
+            if savedPrimaryPart and savedPrimaryPart.Parent == character then
+                character.PrimaryPart = savedPrimaryPart
+            else
+                character.PrimaryPart = realHRP
+            end
 
-		if _G.updateMovementPanelInvisVisual then
-			pcall(_G.updateMovementPanelInvisVisual, true)
-		end
+            character.Parent = workspace
+            rewireCharacter(character, cloneHRP, realHRP)
 
-		tracks = {}
-		removeFolders()
-		local v10 = doClone()
+            local restoreCFrame = cloneHRP and cloneHRP.Parent and cloneHRP.CFrame
+            if cloneHRP then
+                cloneHRP:Destroy()
+                cloneHRP = nil
+            end
 
-		if v10 then
-			task.wait(0.05)
-			animationTrickery()
+            if restoreCFrame then
+                realHRP.CFrame = restoreCFrame
+            end
 
-			task.defer(function()
-				if _G.resetBrainrotBeam then
-					pcall(_G.resetBrainrotBeam)
-				end
+            if savedCanCollide ~= nil then
+                realHRP.CanCollide = savedCanCollide
+            else
+                realHRP.CanCollide = true
+            end
 
-				if _G.resetPlotBeam then
-					pcall(_G.resetPlotBeam)
-				end
+            temp:Destroy()
+        end)
+    else
+        if cloneHRP then
+            pcall(function() cloneHRP:Destroy() end)
+            cloneHRP = nil
+        end
+        if realHRP and realHRP.Parent and character and character.Parent then
+            pcall(function() realHRP.Parent = character end)
+        end
+    end
 
-				task.wait(0.1)
+    if humanoid and humanoid.Parent then
+        if savedHipHeight ~= nil then
+            pcall(function() humanoid.HipHeight = savedHipHeight end)
+        end
+        for state, wasEnabled in pairs(savedHumanoidStates) do
+            pcall(function()
+                humanoid:SetStateEnabled(state, wasEnabled)
+            end)
+        end
+    end
 
-				if _G.updateBrainrotBeam then
-					pcall(_G.updateBrainrotBeam)
-				end
+    realHRP = nil
+    cloneHRP = nil
+    activeCharacter = nil
+    activeHumanoid = nil
+    savedHipHeight = nil
+    savedPrimaryPart = nil
+    savedCanCollide = nil
+    savedHumanoidStates = {}
+    lastTarget = nil
 
-				if _G.createPlotBeam then
-					pcall(_G.createPlotBeam)
-				end
-			end)
+    _G.EliteInvisActive = false
+    _G.invisibleStealEnabled = false
+    syncInvisUi(false)
+end
 
-			local position = nil
-			local n7 = 5
+local function playAnimation(character, humanoid)
+    if not (character and humanoid and humanoid.Health > 0) then return end
 
-			connection = RunService.PreSimulation:Connect(function()
-				if player.Character and player.Character.FindFirstChild(player.Character, "Humanoid") and player.Character.Humanoid.Health > 0 and oldRoot then
-					local primaryPart = player.Character.PrimaryPart or player.Character.FindFirstChild(player.Character, "HumanoidRootPart")
+    local animation = Instance.new("Animation")
+    animation.AnimationId = "rbxassetid://18537363391"
 
-					if primaryPart then
-						local state = player.Character.Humanoid:GetState()
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = humanoid
+    end
 
-						if state == Enum.HumanoidStateType.Physics or state == Enum.HumanoidStateType.Ragdoll then
-							pcall(function()
-								primaryPart.AssemblyLinearVelocity = Vector3.zero
-								primaryPart.AssemblyAngularVelocity = Vector3.zero
-								oldRoot.Velocity = Vector3.zero
-							end)
-						end
+    local ok, track = pcall(function()
+        return animator:LoadAnimation(animation)
+    end)
+    animation:Destroy()
 
-						if n7 > 0 then
-							n7 = n7 - 1
-							position = nil
-						elseif position and ghostEnabled then
-							local magnitude = (oldRoot.Position - position).Magnitude
+    if not ok or not track then
+        warn("[Invis Only] No se pudo cargar la animación de Invis.")
+        return
+    end
 
-							if magnitude > 3 and not _G.RecoveryInProgress then
-								position = nil
-								fn13(oldRoot.Position)
+    animationTrack = track
+    track.Priority = Enum.AnimationPriority.Action4
+    track.Looped = true
+    track:Play(0, 1, 0)
 
-								if _G.AutoRecoverLagback and _G._forceInvisToggle and not _G.bjkInstaResetting and not (_G._instaResetTime and os.clock() - _G._instaResetTime < 2) then
-									_G.RecoveryInProgress = true
-									local bjkLagbackRecoveryGen
-									_G._bjkLagbackRecoveryGen = (_G._bjkLagbackRecoveryGen or 0) + 1
-									bjkLagbackRecoveryGen = _G._bjkLagbackRecoveryGen
+    addConnection(track.Stopped:Connect(function()
+        if active and activeCharacter == character and activeHumanoid == humanoid then
+            task.defer(function()
+                if active and activeCharacter == character then
+                    playAnimation(character, humanoid)
+                end
+            end)
+        end
+    end))
 
-									task.spawn(function()
-										pcall(_G._forceInvisToggle)
-										task.wait(0.5)
-										if bjkLagbackRecoveryGen ~= _G._bjkLagbackRecoveryGen then
-											return
-										end
+    task.defer(function()
+        if animationTrack == track and active then
+            pcall(function()
+                track.TimePosition = 0.7
+                task.delay(0.1, function()
+                    if animationTrack == track and active then
+                        pcall(function() track:AdjustSpeed(math.huge) end)
+                    end
+                end)
+            end)
+        end
+    end)
+end
 
-										if not _G.bjkInstaResetting and not (_G._instaResetTime and os.clock() - _G._instaResetTime < 2) and player.Character == player.Character and player.Character.Parent then
-											pcall(_G._forceInvisToggle)
-										end
+local function start()
+    if active then return true end
 
-										_G.RecoveryInProgress = false
-									end)
-								end
-							end
-						end
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local camera = workspace.CurrentCamera
 
-						if clone then
-							clone.CanCollide = true
-						end
+    if not character or not humanoid or humanoid.Health <= 0 then
+        return false
+    end
+    if not camera then
+        warn("[Invis Only] No se encontró CurrentCamera.")
+        return false
+    end
 
-						for k, child in pairs(oldRoot:GetChildren()) do
-							if child:IsA("Attachment") or child:IsA("Beam") then
-								child:Destroy()
-							end
-						end
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not (root and root:IsA("BasePart") and root.Parent) then
+        warn("[Invis Only] No se encontró HumanoidRootPart.")
+        return false
+    end
 
-						local autoRotateInvis, n8, n9
-						autoRotateInvis = _G.AutoRotateInvis and fn15() or (_G.InvisStealAngle or 180)
-						n8 = (_G.SinkSliderValue or 5) * 0.5
-						n9 = primaryPart.CFrame - Vector3.new(0, n8, 0)
-						oldRoot.CFrame = n9 * CFrame.Angles(math.rad(autoRotateInvis), 0, 0)
-						oldRoot.Velocity = primaryPart.Velocity
-						oldRoot.CanCollide = false
-						position = oldRoot.Position
-					end
-				else
-					if animPlaying then
-						invisTurnOff()
-					end
-				end
-			end)
-		else
-			local tbl9 = {}
-			animPlaying = false
-			_G.invisibleStealEnabled = false
-			_G.RecoveryInProgress = false
-			setToggle("Invisible Steal", false)
+    activeCharacter = character
+    activeHumanoid = humanoid
+    realHRP = root
+    savedHipHeight = humanoid.HipHeight
+    savedPrimaryPart = character.PrimaryPart
+    savedCanCollide = root.CanCollide
+    savedHumanoidStates = {}
 
-			if _G.updateMovementPanelInvisVisual then
-				pcall(_G.updateMovementPanelInvisVisual, false)
-			end
-		end
-	end
+    for _, state in ipairs(STATES_TO_TOGGLE) do
+        local ok, wasEnabled = pcall(function()
+            return humanoid:GetStateEnabled(state)
+        end)
+        if ok then
+            savedHumanoidStates[state] = wasEnabled
+        end
+    end
 
-	_G.toggleInvisibleSteal = function()
-		if os.clock() - _invisToggleCooldown < 0.3 then
-			return
-		end
+    local ok, err = pcall(function()
+        local playerFolder = workspace:FindFirstChild(LocalPlayer.Name)
+        if playerFolder then
+            for _, childName in ipairs({"DoubleRig", "Constraints"}) do
+                local child = playerFolder:FindFirstChild(childName)
+                if child then child:Destroy() end
+            end
+            addConnection(playerFolder.ChildAdded:Connect(function(child)
+                if child.Name == "DoubleRig" or child.Name == "Constraints" then
+                    pcall(function() child:Destroy() end)
+                end
+            end))
+        end
 
-		if animPlaying then
-			invisTurnOff()
-		else
-			invisTurnOn()
-		end
-	end
+        for _, state in ipairs(STATES_TO_TOGGLE) do
+            pcall(function() humanoid:SetStateEnabled(state, false) end)
+        end
 
-	_G._forceInvisToggle = function()
-		if animPlaying then
-			invisTurnOff()
-		else
-			invisTurnOn()
-		end
-	end
+        local temp = Instance.new("Model")
+        temp.Name = "InvisSetup"
+        temp.Parent = game
 
-	hardResetInvisState = function()
-		animPlaying = false
-		_G.invisibleStealEnabled = false
+        character.Parent = temp
 
-		for k, v9 in pairs(tracks) do
-			pcall(function()
-				v9:Stop()
-			end)
-		end
+        cloneHRP = root:Clone()
+        cloneHRP.Name = "HumanoidRootPart"
+        cloneHRP.Parent = character
 
-		tracks = {}
+        root.Parent = camera
+        cloneHRP.CFrame = root.CFrame
 
-		if connection then
-			pcall(function()
-				connection:Disconnect()
-			end)
+        character.PrimaryPart = cloneHRP
+        character.Parent = workspace
 
-			connection = nil
-		end
+        rewireCharacter(character, root, cloneHRP)
+        temp:Destroy()
 
-		for i, v9 in ipairs(folderConnections) do
-			if v9 then
-				pcall(function()
-					v9:Disconnect()
-				end)
-			end
-		end
+        active = true
+        _G.EliteInvisActive = true
+        _G.invisibleStealEnabled = true
+        syncInvisUi(true)
 
-		folderConnections = {}
+        savedTransparency = {}
+        for _, item in ipairs(character:GetDescendants()) do
+            if item:IsA("BasePart") then
+                savedTransparency[item] = item.LocalTransparencyModifier
+                item.LocalTransparencyModifier = 1
+            end
+        end
 
-		if clone then
-			pcall(function()
-				clone:Destroy()
-			end)
+        addConnection(character.DescendantAdded:Connect(function(item)
+            if not active or not item:IsA("BasePart") then return end
+            if savedTransparency and savedTransparency[item] == nil then
+                savedTransparency[item] = item.LocalTransparencyModifier
+            end
+            pcall(function() item.LocalTransparencyModifier = 1 end)
+        end))
 
-			clone = nil
-		end
+        playAnimation(character, humanoid)
 
-		if oldRoot then
-			pcall(function()
-				oldRoot:Destroy()
-			end)
+        local graceFrames = 60
+        local protectionCounter = 0
 
-			oldRoot = nil
-		end
+        addConnection(RunService.PreSimulation:Connect(function()
+            if not active then return end
+            if _G.EliteInstantResetting or _G.__Elite_Launching then return end
 
-		_G._invisOldRoot = nil
-		local tbl9 = {}
-		_G._invisClone = nil
-		hip = nil
-		fn14()
+            if not (activeCharacter == character and character.Parent) then
+                task.defer(stop)
+                return
+            end
 
-		pcall(function()
-			local v9 = Workspace:FindFirstChild(player.Name)
+            if not (realHRP and realHRP.Parent and cloneHRP and cloneHRP.Parent) then
+                task.defer(stop)
+                return
+            end
 
-			if v9 then
-				local doubleRig = v9:FindFirstChild("DoubleRig")
+            protectionCounter += 1
+            if graceFrames > 0 then
+                graceFrames -= 1
+            elseif _G.AutoRecoverLagback ~= false
+                and _G.EliteInvisAutoRecover ~= false
+                and lastTarget
+                and not restarting
+                and (realHRP.Position - lastTarget).Magnitude
+                    > (numberOr(_G.EliteInvisRestartDist, 8)) then
 
-				if doubleRig then
-					doubleRig:Destroy()
-				end
+                restarting = true
+                task.spawn(function()
+                    stop()
+                    task.wait(numberOr(_G.EliteInvisRestartWait, 0.5))
+                    restarting = false
+                    if _G.AutoRecoverLagback ~= false
+                        and _G.EliteInvisAutoRecover ~= false
+                        and isStealingNow() then
+                        start()
+                    end
+                end)
+                return
+            end
 
-				local constraints = v9:FindFirstChild("Constraints")
+            local base = cloneHRP
+            local offset = currentDepthOffset()
+            local target = base.CFrame - Vector3.new(
+                0,
+                humanoid.HipHeight + (base.Size.Y / 2) - 1 + offset,
+                0
+            )
 
-				if constraints then
-					constraints:Destroy()
-				end
-			end
-		end)
+            realHRP.CFrame = target * CFrame.Angles(math.rad(currentAngle()), 0, 0)
+            realHRP.AssemblyLinearVelocity = base.AssemblyLinearVelocity
+            realHRP.CanCollide = false
 
-		if _G.updateMovementPanelInvisVisual then
-			pcall(_G.updateMovementPanelInvisVisual, false)
-		end
-	end
+            local currentCamera = workspace.CurrentCamera
+            if currentCamera and realHRP.Parent ~= currentCamera then
+                realHRP.Parent = currentCamera
+            end
+
+            lastTarget = target.Position
+        end))
+
+        addConnection(LocalPlayer.CharacterAdded:Connect(function()
+            if active then
+                task.defer(stop)
+            end
+        end))
+    end)
+
+    if not ok then
+        warn("[Invis Only] Error al activar Invis: " .. tostring(err))
+        stop()
+        return false
+    end
+
+    return true
+end -- cierre de start(); el puente debe registrarse al cargar el Hub
+
+-- Puente de compatibilidad: conserva los nombres que utiliza la UI original
+-- y el controlador automático del Hub, pero delega todo en el mecanismo nuevo.
+invisTurnOn = function()
+    return start()
+end
+
+function invisTurnOff()
+    return stop()
+end
+
+hardResetInvisState = function()
+    stop()
+    _G.invisibleStealEnabled = false
+    _G.EliteInvisActive = false
+end
+
+_G.EliteInvisStart = start
+_G.EliteInvisStop = stop
+_G.EliteInvisToggle = function()
+    if active then
+        stop()
+        return false
+    end
+    return start()
+end
+
+_G.toggleInvisibleSteal = function()
+    if os.clock() - (_invisToggleCooldown or 0) < 0.3 then
+        return
+    end
+    _invisToggleCooldown = os.clock()
+    if active then
+        stop()
+        setToggle("Invisible Steal", false)
+    else
+        local ok = start()
+        if ok then
+            setToggle("Invisible Steal", true)
+        end
+    end
+end
+
+_G._forceInvisToggle = function()
+    if active then
+        stop()
+        setToggle("Invisible Steal", false)
+    else
+        local ok = start()
+        if ok then
+            setToggle("Invisible Steal", true)
+        end
+    end
+end
+
+-- Mantener sincronizado el indicador visual del panel de Script 1.
+local __newInvisStateConnection = RunService.Heartbeat:Connect(function()
+    if _G.invisibleStealEnabled ~= active then
+        _G.invisibleStealEnabled = active
+        _G.EliteInvisActive = active
+        pcall(setToggle, "Invisible Steal", active)
+        if _G.updateMovementPanelInvisVisual then
+            pcall(_G.updateMovementPanelInvisVisual, active)
+        end
+    end
+end)
+
 
 	player.CharacterAdded:Connect(function(character2)
 		task.wait(0.1)
@@ -7081,10 +7237,11 @@ do
 						end)
 
 						if n7 and n7 > 0 then
-							_G.BJK_InvisDelaySeq = (_G.BJK_InvisDelaySeq or 0) + 1
+							local delaySequence = (_G.BJK_InvisDelaySeq or 0) + 1
+							_G.BJK_InvisDelaySeq = delaySequence
 
 							task.delay(n7 / 1000, function()
-								if _G.BJK_InvisDelaySeq ~= _G.BJK_InvisDelaySeq then
+								if _G.BJK_InvisDelaySeq ~= delaySequence then
 									return
 								end
 
@@ -7107,8 +7264,14 @@ do
 								flag4 = true
 							end)
 						else
+							local delaySequence = (_G.BJK_InvisDelaySeq or 0) + 1
+							_G.BJK_InvisDelaySeq = delaySequence
 							task.defer(function()
 								task.wait(0.2)
+
+								if _G.BJK_InvisDelaySeq ~= delaySequence or mainConfig.AutoInvisDuringSteal == false then
+									return
+								end
 
 								if fn8() and not _G.invisibleStealEnabled and not _G.bjkInstaResetting and not (_G._instaResetTime and os.clock() - _G._instaResetTime < 2) then
 									pcall(_G._forceInvisToggle)
@@ -10524,58 +10687,6 @@ do
 
 		if FloatState.active and flag3 then
 			setFloat(false)
-		end
-
-		if _G.AutoInvisDuringSteal then
-			if flag3 and not _G.invisibleStealEnabled and not _G.bjkInstaResetting and not (os.clock() - (_G._instaResetTime or 0) < 2) and _G._forceInvisToggle then
-				local n7 = 0
-
-				pcall(function()
-					n7 = _G.BJK_GetInvisDelayMs and _G.BJK_GetInvisDelayMs() or (_G.BJK_InvisDelayEnabled and tonumber(_G.BJK_InvisDelayMs) or 0)
-				end)
-
-				if n7 and n7 > 0 then
-					_G.BJK_InvisDelaySeq = (_G.BJK_InvisDelaySeq or 0) + 1
-
-					task.delay(n7 / 1000, function()
-						if _G.BJK_InvisDelaySeq ~= _G.BJK_InvisDelaySeq then
-							return
-						end
-
-						if not _G.AutoInvisDuringSteal then
-							return
-						end
-
-						if not player:GetAttribute("Stealing") then
-							return
-						end
-
-						if _G.invisibleStealEnabled then
-							return
-						end
-
-						if _G.bjkInstaResetting or os.clock() - (_G._instaResetTime or 0) < 2 then
-							return
-						end
-						pcall(_G._forceInvisToggle)
-					end)
-				else
-					task.defer(function()
-						task.wait(0.2)
-
-						if player:GetAttribute("Stealing") and not _G.invisibleStealEnabled and not _G.bjkInstaResetting and not (os.clock() - (_G._instaResetTime or 0) < 2) then
-							pcall(_G._forceInvisToggle)
-						end
-					end)
-				end
-			elseif not flag3 and _G.invisibleStealEnabled and _G._forceInvisToggle then
-				_G.BJK_InvisDelaySeq = (_G.BJK_InvisDelaySeq or 0) + 1
-				task.wait(0.3)
-
-				if not player:GetAttribute("Stealing") then
-					pcall(_G._forceInvisToggle)
-				end
-			end
 		end
 
 		if flag3 and mainConfig.AutoUnlockOnSteal then
