@@ -1,0 +1,51 @@
+local Players = game:GetService("Players")
+local Stats = game:GetService("Stats")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Crear ScreenGui
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "TemuPingTeller"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+-- Crear cuadro principal
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 200, 0, 70)
+frame.Position = UDim2.new(0.5, -100, 0, 20)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 8)
+corner.Parent = frame
+
+-- Título
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, 0, 0.5, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "Temu Ping Teller"
+titleLabel.TextColor3 = Color3.fromRGB(255, 140, 0)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 16
+titleLabel.Parent = frame
+
+-- Texto del Ping
+local pingLabel = Instance.new("TextLabel")
+pingLabel.Size = UDim2.new(1, 0, 0.5, 0)
+pingLabel.Position = UDim2.new(0, 0, 0.5, 0)
+pingLabel.BackgroundTransparency = 1
+pingLabel.Text = "Ping: 0 ms"
+pingLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+pingLabel.Font = Enum.Font.Gotham
+pingLabel.TextSize = 14
+pingLabel.Parent = frame
+
+-- Actualizar ping constantemente
+RunService.RenderStepped:Connect(function()
+	local ping = math.round(Stats.Network.ServerStatsItem["Data Ping"]:GetValue())
+	pingLabel.Text = "Ping: " .. ping .. " ms"
+end)
